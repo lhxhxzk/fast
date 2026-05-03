@@ -7,10 +7,10 @@ from sqlalchemy.orm import Session
 
 from database import SessionLocal, get_db, init_db
 from event_bus import event_bus
-from events import OrderCreatedEvent
+from events import OrderCreatedEvent, event_to_json
 from handlers import handle_order_created, handle_production_task_created, handle_purchase_needed
-from models import EventLog, Order
-from schemas import OrderCreateRequest, OrderResponse
+from models import EventLog, Order, ProductionTask
+from schemas import OrderCreateRequest, OrderResponse, OrderListItem, OrderListResponse, EventListItem, EventListResponse
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -39,6 +39,47 @@ def health_check(db: Session = Depends(get_db)):
         return {"status": "error", "db": "disconnected"}
 
 
+@app.get("/orders", response_model=OrderListResponse)
+def list_orders(db: Session = Depends(get_db)):
+    orders = db.query(Order).order_by(Order.created_at.desc()).all()
+    items = []
+    for o in orders:
+        items.append(OrderListItem(
+            order_id=o.order_id,
+            product_name=o.product_name,
+            quantity=o.quantity,
+            status=o.status,
+            created_at=o.created_at.isoformat() if o.created_at else None,
+        ))
+    return OrderListResponse(orders=items)
+
+
+@app.get("/events", response_model=EventListResponse)
+def list_events(db: Session = Depends(get_db)):
+    logs = db.query(EventLog).order_by(EventLog.created_at.asc()).all()
+    task_map = {}
+    for t in db.query(ProductionTask).all():
+        task_map[t.event_id] = t.order_id
+    items = []
+    for e in logs:
+        order_id = task_map.get(e.event_id)
+        if not order_id:
+            try:
+                import json
+                payload = json.loads(e.payload)
+                order_id = payload.get("order_id")
+            except Exception:
+                pass
+        items.append(EventListItem(
+            event_id=e.event_id,
+            event_type=e.event_type,
+            status=e.status,
+            order_id=order_id,
+            created_at=e.created_at.isoformat() if e.created_at else None,
+        ))
+    return EventListResponse(events=items)
+
+
 @app.post("/orders", response_model=OrderResponse, status_code=202)
 def create_order(
     request: OrderCreateRequest,
@@ -62,7 +103,7 @@ def create_order(
             product_name=request.product_name,
             quantity=request.quantity,
         )
-        payload = event.model_dump_json()
+        payload = event_to_json(event)
 
         event_log = EventLog(
             event_id=event.event_id,

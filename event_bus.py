@@ -3,6 +3,7 @@ from typing import Any, Callable, Dict, List
 
 from sqlalchemy.orm import Session
 
+from events import event_to_json
 from models import EventLog
 
 logger = logging.getLogger(__name__)
@@ -24,7 +25,7 @@ class EventBus:
 
         existing_log = db.query(EventLog).filter(EventLog.event_id == event.event_id).first()
         if not existing_log:
-            payload = event.model_dump_json()
+            payload = event_to_json(event)
             event_log = EventLog(
                 event_id=event.event_id,
                 event_type=event_type,

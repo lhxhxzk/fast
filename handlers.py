@@ -47,6 +47,7 @@ def handle_production_task_created(event: ProductionTaskCreatedEvent, db: Sessio
         purchase_id = str(uuid4())
         new_event = PurchaseNeededEvent(
             purchase_id=purchase_id,
+            order_id=event.order_id,
             material_name=event.product_name,
             quantity_needed=event.quantity,
         )

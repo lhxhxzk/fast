@@ -118,6 +118,37 @@ pip install pytest httpx
 python -m pytest test_main.py -v
 ```
 
+### 8. 清空数据库
+
+**方法一：删除数据库文件（推荐，最快捷）**
+
+先停止服务（Ctrl+C），然后执行：
+
+```bash
+del manufacturing.db manufacturing.db-wal manufacturing.db-shm
+```
+
+下次启动服务时会自动创建新的空数据库。
+
+**方法二：用 Python 清空表数据（不删文件）**
+
+```bash
+python -c "from database import SessionLocal; from models import *; db=SessionLocal(); db.query(ProductionTask).delete(); db.query(EventLog).delete(); db.query(Order).delete(); db.commit(); print('数据库已清空'); db.close()"
+```
+
+> **注意**：清空顺序必须先删 ProductionTask 和 EventLog，再删 Order，因为存在外键关联。
+
+### 9. 启动前端页面
+
+```bash
+pip install streamlit
+streamlit run app.py --server.port 8501 --server.headless true
+```
+
+浏览器打开 http://localhost:8501 即可看到订单创建表单和事件流转链路。
+
+> **前提**：FastAPI 后端必须在 8000 端口运行。
+
 ## 核心功能
 
 ### 1. 订单接入
@@ -325,7 +356,7 @@ db.commit()
 
 ## 事件定义
 
-三个核心业务事件均使用 pydantic BaseModel 定义，每个事件包含唯一 event_id 和 UTC 时间戳。
+三个核心业务事件均使用 Python dataclass 定义，每个事件包含唯一 event_id 和 UTC 时间戳。
 
 | 事件 | 触发时机 | 携带信息 |
 |------|---------|---------|
