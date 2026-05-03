@@ -62,7 +62,7 @@ def create_order(
             product_name=request.product_name,
             quantity=request.quantity,
         )
-        payload = event.to_json()
+        payload = event.model_dump_json()
 
         event_log = EventLog(
             event_id=event.event_id,
@@ -72,6 +72,7 @@ def create_order(
         )
         db.add(event_log)
         db.commit()
+        logger.info("事件已提交")
 
         background_tasks.add_task(process_event_log, event_log.id, event)
 
@@ -104,6 +105,7 @@ async def process_event_log(event_log_id: int, event):
 
         event_bus.dispatch(event, db)
         db.commit()
+        logger.info("事件已处理")
     except Exception as e:
         logger.error(f"后台处理事件失败: {e}")
         try:

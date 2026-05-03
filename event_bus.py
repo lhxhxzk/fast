@@ -24,7 +24,7 @@ class EventBus:
 
         existing_log = db.query(EventLog).filter(EventLog.event_id == event.event_id).first()
         if not existing_log:
-            payload = event.to_json()
+            payload = event.model_dump_json()
             event_log = EventLog(
                 event_id=event.event_id,
                 event_type=event_type,

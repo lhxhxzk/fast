@@ -1,41 +1,29 @@
-import json
-from dataclasses import dataclass, field, asdict
 from datetime import datetime
 from uuid import uuid4
 
-
-@dataclass
-class OrderCreatedEvent:
-    event_id: str = field(default_factory=lambda: str(uuid4()))
-    order_id: str = ""
-    product_name: str = ""
-    quantity: int = 0
-    timestamp: str = field(default_factory=lambda: datetime.utcnow().isoformat())
-
-    def to_json(self) -> str:
-        return json.dumps(asdict(self), ensure_ascii=False)
+from pydantic import BaseModel, Field
 
 
-@dataclass
-class ProductionTaskCreatedEvent:
-    event_id: str = field(default_factory=lambda: str(uuid4()))
-    task_id: str = ""
-    order_id: str = ""
-    product_name: str = ""
-    quantity: int = 0
-    timestamp: str = field(default_factory=lambda: datetime.utcnow().isoformat())
-
-    def to_json(self) -> str:
-        return json.dumps(asdict(self), ensure_ascii=False)
+class OrderCreatedEvent(BaseModel):
+    event_id: str = Field(default_factory=lambda: str(uuid4()))
+    order_id: str
+    product_name: str
+    quantity: int
+    timestamp: datetime = Field(default_factory=datetime.utcnow)
 
 
-@dataclass
-class PurchaseNeededEvent:
-    event_id: str = field(default_factory=lambda: str(uuid4()))
-    purchase_id: str = ""
-    material_name: str = ""
-    quantity_needed: int = 0
-    timestamp: str = field(default_factory=lambda: datetime.utcnow().isoformat())
+class ProductionTaskCreatedEvent(BaseModel):
+    event_id: str = Field(default_factory=lambda: str(uuid4()))
+    task_id: str
+    order_id: str
+    product_name: str
+    quantity: int
+    timestamp: datetime = Field(default_factory=datetime.utcnow)
 
-    def to_json(self) -> str:
-        return json.dumps(asdict(self), ensure_ascii=False)
+
+class PurchaseNeededEvent(BaseModel):
+    event_id: str = Field(default_factory=lambda: str(uuid4()))
+    purchase_id: str
+    material_name: str
+    quantity_needed: int
+    timestamp: datetime = Field(default_factory=datetime.utcnow)
