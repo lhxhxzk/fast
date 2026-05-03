@@ -59,15 +59,38 @@ python -c "import requests; print(requests.post('http://127.0.0.1:8000/orders', 
 python -c "import requests; print(requests.post('http://127.0.0.1:8000/orders', json={'order_id':'ORD-001','product_name':'Widget','quantity':5}).status_code)"
 ```
 
+**负数库存测试（手动事务回滚）：**
+
+```bash
+python -c "import requests; print(requests.post('http://127.0.0.1:8000/orders', json={'order_id':'ORD-NEG','product_name':'Defective','quantity':-5}).json())"
+```
+
+等待 2 秒后查看数据库，确认无脏数据：
+
+```bash
+python -c "from database import SessionLocal; from models import *; db=SessionLocal(); print('Order:', db.query(Order).filter(Order.order_id=='ORD-NEG').first()); print('ProductionTask:', db.query(ProductionTask).filter(ProductionTask.order_id=='ORD-NEG').first()); log=db.query(EventLog).filter(EventLog.event_type=='OrderCreatedEvent').first(); print('EventLog:', log.status if log else 'None'); db.close()"
+```
+
 ### 4. 查看日志验证
 
 回到第一个终端窗口（运行服务的那个），你会看到：
+
+**正常下单日志：**
 
 ```
 INFO:main:事件已提交          ← 订单和事件日志已写入数据库
 INFO:handlers:生产任务已创建: task_id=..., order_id=ORD-001
 INFO:handlers:生产任务创建完成, 数量<=10, 无需采购
 INFO:main:事件已处理          ← 后台事件处理完成
+```
+
+**负数库存回滚日志：**
+
+```
+INFO:main:事件已提交
+ERROR:event_bus:处理器 handle_order_created 处理事件 OrderCreatedEvent 失败: 库存不足，无法创建生产任务: quantity=-5
+INFO:main:手动回滚: 已删除订单 ORD-NEG
+INFO:main:事件已处理
 ```
 
 **"事件已提交"** 和 **"事件已处理"** 两条日志是验收关键标志。
@@ -122,7 +145,54 @@ python -m pytest test_main.py -v
 - 产出：采购需求日志（可扩展为采购建议表）
 - 数量 ≤ 10 时仅记录日志，不触发采购
 
-### 4. 事件日志追踪
+### 4. 库存校验与手动事务回滚
+
+当 handler 检测到库存不足（quantity ≤ 0）时，抛出业务异常触发回滚。由于 Order 在 API 事务中已经 commit，handler 的 rollback 无法撤销它，因此采用**手动删除**的方式清理脏数据。
+
+- 触发条件：quantity ≤ 0
+- 回滚步骤：handler 抛异常 → dispatch rollback 撤销 handler 写入 → 标记 EventLog 为 failed → 手动 delete Order → commit
+- 结果：数据库中无 Order、无 ProductionTask，EventLog 状态为 failed
+
+**回滚原理：**
+
+```
+时间线：
+  API 层:  Order + EventLog → commit → 202 返回     ← Order 已持久化
+  后台:    handler 抛异常 → rollback                  ← 只能撤销 handler 内的写入
+                                                          Order 在另一个事务里，rollback 管不到
+           → 必须显式 delete Order → commit            ← 手动删除才能清理脏数据
+```
+
+**代码实现分布在三个位置：**
+
+① handlers.py —— 检测异常并抛出：
+
+```python
+if event.quantity <= 0:
+    raise ValueError("库存不足，无法创建生产任务")
+```
+
+② event_bus.py —— except 中 rollback + 标记 failed：
+
+```python
+except Exception as e:
+    db.rollback()
+    self._update_event_log_status(db, event.event_id, "failed")
+    return
+```
+
+③ main.py —— dispatch 后检查状态，手动删除 Order：
+
+```python
+event_bus.dispatch(event, db)
+log_entry = db.query(EventLog).filter(...).first()
+if log_entry and log_entry.status == "failed":
+    db.query(Order).filter(Order.order_id == event.order_id).delete()
+    logger.info(f"手动回滚: 已删除订单 {event.order_id}")
+db.commit()
+```
+
+### 5. 事件日志追踪
 
 所有事件的处理过程均被记录到事件日志表中，支持事后审计与问题排查。
 
@@ -130,7 +200,7 @@ python -m pytest test_main.py -v
 - 状态流转：pending → completed（成功）/ failed（失败）
 - 可通过事件ID追溯任意一笔订单的完整处理链路
 
-### 5. 健康检查
+### 6. 健康检查
 
 提供服务与数据库的连通性检测，供上层网关或监控系统调用。
 
@@ -150,14 +220,18 @@ python -m pytest test_main.py -v
   后台异步处理（BackgroundTasks）
         │
         ▼
-  OrderCreatedEvent ──→ 自动创建生产任务
+  OrderCreatedEvent ──→ 库存校验
         │
-        ▼
-  ProductionTaskCreatedEvent ──→ 判断数量
+        ├── quantity ≤ 0 ──→ 抛异常 → rollback → 手动删除 Order → failed
         │
-        ├── 数量 > 10 ──→ PurchaseNeededEvent ──→ 记录采购需求
-        │
-        └── 数量 ≤ 10 ──→ 流程结束
+        └── quantity > 0 ──→ 自动创建生产任务
+                │
+                ▼
+        ProductionTaskCreatedEvent ──→ 判断数量
+                │
+                ├── 数量 > 10 ──→ PurchaseNeededEvent ──→ 记录采购需求
+                │
+                └── 数量 ≤ 10 ──→ 流程结束
 ```
 
 ## API 接口
@@ -178,7 +252,7 @@ python -m pytest test_main.py -v
 |------|------|------|------|
 | order_id | string | 是 | 订单号，全局唯一 |
 | product_name | string | 是 | 产品名称 |
-| quantity | integer | 是 | 订购数量 |
+| quantity | integer | 是 | 订购数量，必须 > 0 |
 
 **响应：**
 
@@ -264,10 +338,12 @@ python -m pytest test_main.py -v
 | 机制 | 说明 |
 |------|------|
 | 事务一致性 | 订单写入与事件日志写入在同一数据库事务中，要么同时成功，要么同时回滚 |
+| 手动事务回滚 | handler 失败时，rollback 撤销 handler 写入，手动删除已 commit 的 Order，确保无脏数据 |
 | 幂等性 | 每个事件携带唯一 event_id，生产任务表通过 event_id 唯一索引防止重复创建 |
 | 去重下单 | 订单号唯一索引，重复提交返回 409 |
 | 异步处理 | 业务逻辑在 BackgroundTasks 中执行，API 立即返回，不阻塞调用方 |
 | 失败可追溯 | 事件处理失败时日志状态标记为 failed，可通过 event_id 定位问题 |
+| 库存校验 | quantity ≤ 0 时拒绝创建生产任务，触发回滚清理 |
 | 时区统一 | 所有时间字段使用 UTC，避免时区混乱 |
 
 ## 模块调用方式

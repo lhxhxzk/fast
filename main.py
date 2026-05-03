@@ -104,6 +104,13 @@ async def process_event_log(event_log_id: int, event):
             return
 
         event_bus.dispatch(event, db)
+
+        log_entry = db.query(EventLog).filter(EventLog.id == event_log_id).first()
+        if log_entry and log_entry.status == "failed":
+            deleted = db.query(Order).filter(Order.order_id == event.order_id).delete()
+            if deleted:
+                logger.info(f"手动回滚: 已删除订单 {event.order_id}")
+
         db.commit()
         logger.info("事件已处理")
     except Exception as e:
@@ -113,7 +120,10 @@ async def process_event_log(event_log_id: int, event):
             log_entry = db.query(EventLog).filter(EventLog.id == event_log_id).first()
             if log_entry and log_entry.status == "pending":
                 log_entry.status = "failed"
-                db.commit()
+            deleted = db.query(Order).filter(Order.order_id == event.order_id).delete()
+            if deleted:
+                logger.info(f"手动回滚: 已删除订单 {event.order_id}")
+            db.commit()
         except Exception as rollback_err:
             logger.error(f"回滚后更新状态也失败: {rollback_err}")
             db.rollback()

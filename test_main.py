@@ -179,6 +179,36 @@ def test_handler_exception_marks_failed(client, db_session):
         assert event_log.status == "failed"
 
         order = db_session.query(Order).filter(Order.order_id == "ORD-FAIL").first()
-        assert order is not None
+        assert order is None
     finally:
         event_bus._handlers["OrderCreatedEvent"] = [original_handler]
+
+
+def test_negative_quantity_rollback(client, db_session):
+    payload = {
+        "order_id": "ORD-NEG",
+        "product_name": "DefectiveWidget",
+        "quantity": -5,
+    }
+    response = client.post("/orders", json=payload)
+    assert response.status_code == 202
+
+    time.sleep(1)
+
+    order = db_session.query(Order).filter(Order.order_id == "ORD-NEG").first()
+    assert order is None
+
+    task = (
+        db_session.query(ProductionTask)
+        .filter(ProductionTask.order_id == "ORD-NEG")
+        .first()
+    )
+    assert task is None
+
+    event_log = (
+        db_session.query(EventLog)
+        .filter(EventLog.event_type == "OrderCreatedEvent")
+        .first()
+    )
+    assert event_log is not None
+    assert event_log.status == "failed"

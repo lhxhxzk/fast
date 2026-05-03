@@ -18,6 +18,9 @@ def handle_order_created(event: OrderCreatedEvent, db: Session):
         logger.info(f"幂等跳过: ProductionTask 已存在, event_id={event.event_id}")
         return
 
+    if event.quantity <= 0:
+        raise ValueError(f"库存不足，无法创建生产任务: quantity={event.quantity}")
+
     task_id = str(uuid4())
     task = ProductionTask(
         task_id=task_id,
