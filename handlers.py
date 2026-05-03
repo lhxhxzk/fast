@@ -1,6 +1,8 @@
 import logging
+import time
 from uuid import uuid4
 
+import requests as http_requests
 from sqlalchemy.orm import Session
 
 from event_bus import event_bus
@@ -8,6 +10,18 @@ from events import OrderCreatedEvent, ProductionTaskCreatedEvent, PurchaseNeeded
 from models import ProductionTask
 
 logger = logging.getLogger(__name__)
+
+INVENTORY_SERVICE_URL = "http://127.0.0.1:9999/inventory"
+
+
+def call_inventory_service(quantity: int) -> bool:
+    try:
+        resp = http_requests.get(INVENTORY_SERVICE_URL, timeout=2)
+        return resp.status_code == 200
+    except (http_requests.exceptions.ConnectionError,
+            http_requests.exceptions.Timeout,
+            http_requests.exceptions.RequestException) as e:
+        raise ConnectionError(f"网络服务不可用: {e}")
 
 
 def handle_order_created(event: OrderCreatedEvent, db: Session):
@@ -17,6 +31,14 @@ def handle_order_created(event: OrderCreatedEvent, db: Session):
     if existing:
         logger.info(f"幂等跳过: ProductionTask 已存在, event_id={event.event_id}")
         return
+
+    if event.product_name == "SLOW":
+        logger.info(f"模拟超时: product_name=SLOW, 等待5秒...")
+        time.sleep(5)
+
+    if event.product_name == "NETFAIL":
+        logger.info(f"模拟网络失败: product_name=NETFAIL, 调用不存在的库存服务...")
+        call_inventory_service(event.quantity)
 
     if event.quantity <= 0:
         raise ValueError(f"库存不足，无法创建生产任务: quantity={event.quantity}")

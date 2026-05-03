@@ -29,14 +29,82 @@ if submitted:
         }, timeout=5)
         if resp.status_code == 202:
             st.success(f"✅ 订单 {order_id} 已受理，后台处理中...")
-            time.sleep(2)
+            time.sleep(3)
+            check_resp = requests.get(f"{API_BASE}/orders", timeout=5)
+            if check_resp.status_code == 200:
+                orders = check_resp.json().get("orders", [])
+                found = [o for o in orders if o["order_id"] == order_id]
+                if found:
+                    st.info(f"📋 订单状态: {found[0]['status']}")
+                else:
+                    st.error(f"❌ 订单生产采购失败")
             st.rerun()
         elif resp.status_code == 409:
-            st.warning(f"⚠️ 订单 {order_id} 已存在")
+            check_resp = requests.get(f"{API_BASE}/orders", timeout=5)
+            if check_resp.status_code == 200:
+                orders = check_resp.json().get("orders", [])
+                found = [o for o in orders if o["order_id"] == order_id]
+                if found:
+                    st.warning(f"⚠️ 重复提交: 订单 {order_id} 已存在，首次订单状态: {found[0]['status']}")
+                else:
+                    st.warning(f"⚠️ 重复提交: 订单 {order_id} 已存在")
+            else:
+                st.warning(f"⚠️ 重复提交: 订单 {order_id} 已存在")
         else:
             st.error(f"❌ 创建失败: {resp.status_code} {resp.text}")
     except Exception as e:
-        st.error(f"❌ 连接服务失败: {e}")
+        st.error(f"❌ 网络服务不可用，订单生产采购失败: {e}")
+
+st.divider()
+
+st.subheader("🧪 异常场景模拟")
+col_a, col_c = st.columns(2)
+
+with col_a:
+    if st.button("⏱️ 模拟超时", key="btn_timeout"):
+        try:
+            resp = requests.post(f"{API_BASE}/orders", json={
+                "order_id": "ORD-TIMEOUT",
+                "product_name": "SLOW",
+                "quantity": 5,
+            }, timeout=5)
+            if resp.status_code == 202:
+                st.warning("⏱️ 超时订单已提交，handler 将等待5秒，3秒后触发超时回滚...")
+                time.sleep(6)
+                check_resp = requests.get(f"{API_BASE}/orders", timeout=5)
+                if check_resp.status_code == 200:
+                    orders = check_resp.json().get("orders", [])
+                    found = [o for o in orders if o["order_id"] == "ORD-TIMEOUT"]
+                    if found:
+                        st.info(f"📋 订单状态: {found[0]['status']}")
+                    else:
+                        st.error("❌ 订单生产采购失败")
+                st.rerun()
+        except Exception as e:
+            st.error(f"❌ 网络服务不可用，订单生产采购失败: {e}")
+
+with col_c:
+    if st.button("🌐 模拟网络失败", key="btn_netfail"):
+        try:
+            resp = requests.post(f"{API_BASE}/orders", json={
+                "order_id": "ORD-NETFAIL",
+                "product_name": "NETFAIL",
+                "quantity": 5,
+            }, timeout=5)
+            if resp.status_code == 202:
+                st.warning("🌐 网络失败订单已提交，handler 将调用不存在的库存服务...")
+                time.sleep(4)
+                check_resp = requests.get(f"{API_BASE}/orders", timeout=5)
+                if check_resp.status_code == 200:
+                    orders = check_resp.json().get("orders", [])
+                    found = [o for o in orders if o["order_id"] == "ORD-NETFAIL"]
+                    if found:
+                        st.info(f"📋 订单状态: {found[0]['status']}")
+                    else:
+                        st.error("❌ 网络服务不可用，订单生产采购失败")
+                st.rerun()
+        except Exception as e:
+            st.error(f"❌ 网络服务不可用，订单生产采购失败: {e}")
 
 st.divider()
 
@@ -89,9 +157,6 @@ try:
 
                             st.caption(f"ID: {short_id}...")
                             st.caption(f"状态: {status}")
-
-                            if i < len(evts) - 1:
-                                pass
 
                     chain_parts = []
                     for ev in evts:

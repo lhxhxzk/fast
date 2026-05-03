@@ -212,3 +212,56 @@ def test_negative_quantity_rollback(client, db_session):
     )
     assert event_log is not None
     assert event_log.status == "failed"
+
+
+def test_timeout_simulation(client, db_session):
+    payload = {
+        "order_id": "ORD-SLOW",
+        "product_name": "SLOW",
+        "quantity": 5,
+    }
+    response = client.post("/orders", json=payload)
+    assert response.status_code == 202
+
+    time.sleep(5)
+
+    event_log = (
+        db_session.query(EventLog)
+        .filter(EventLog.event_type == "OrderCreatedEvent")
+        .first()
+    )
+    assert event_log is not None
+    assert event_log.status == "failed"
+
+    order = db_session.query(Order).filter(Order.order_id == "ORD-SLOW").first()
+    assert order is None
+
+
+def test_network_failure_simulation(client, db_session):
+    payload = {
+        "order_id": "ORD-NETFAIL",
+        "product_name": "NETFAIL",
+        "quantity": 5,
+    }
+    response = client.post("/orders", json=payload)
+    assert response.status_code == 202
+
+    time.sleep(2)
+
+    event_log = (
+        db_session.query(EventLog)
+        .filter(EventLog.event_type == "OrderCreatedEvent")
+        .first()
+    )
+    assert event_log is not None
+    assert event_log.status == "failed"
+
+    order = db_session.query(Order).filter(Order.order_id == "ORD-NETFAIL").first()
+    assert order is None
+
+    task = (
+        db_session.query(ProductionTask)
+        .filter(ProductionTask.order_id == "ORD-NETFAIL")
+        .first()
+    )
+    assert task is None

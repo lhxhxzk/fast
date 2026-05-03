@@ -71,7 +71,47 @@ python -c "import requests; print(requests.post('http://127.0.0.1:8000/orders', 
 python -c "from database import SessionLocal; from models import *; db=SessionLocal(); print('Order:', db.query(Order).filter(Order.order_id=='ORD-NEG').first()); print('ProductionTask:', db.query(ProductionTask).filter(ProductionTask.order_id=='ORD-NEG').first()); log=db.query(EventLog).filter(EventLog.event_type=='OrderCreatedEvent').first(); print('EventLog:', log.status if log else 'None'); db.close()"
 ```
 
-### 4. 查看日志验证
+### 4. 异常场景测试
+
+**超时模拟（product_name="SLOW"）：**
+
+```bash
+python -c "import requests; print(requests.post('http://127.0.0.1:8000/orders', json={'order_id':'ORD-SLOW','product_name':'SLOW','quantity':5}).json())"
+```
+
+handler 等待 5 秒，超过 3 秒超时阈值，自动回滚。服务端日志：
+
+```
+INFO:handlers:模拟超时: product_name=SLOW, 等待5秒...
+ERROR:main:后台处理事件超时: elapsed=5.0s > timeout=3s, order_id=ORD-SLOW
+INFO:main:手动回滚: 已删除订单 ORD-SLOW
+INFO:main:事件已处理
+```
+
+**重复提交（相同 order_id）：**
+
+```bash
+python -c "import requests; r1=requests.post('http://127.0.0.1:8000/orders', json={'order_id':'ORD-DUP','product_name':'Widget','quantity':3}); print('第1次:', r1.status_code); r2=requests.post('http://127.0.0.1:8000/orders', json={'order_id':'ORD-DUP','product_name':'Widget','quantity':3}); print('第2次:', r2.status_code, r2.json())"
+```
+
+第 2 次返回 409，前端提示：`⚠️ 重复提交: 订单 ORD-DUP 已存在`
+
+**网络失败模拟（product_name="NETFAIL"）：**
+
+```bash
+python -c "import requests; print(requests.post('http://127.0.0.1:8000/orders', json={'order_id':'ORD-NET','product_name':'NETFAIL','quantity':5}).json())"
+```
+
+handler 调用不存在的库存服务（127.0.0.1:9999），连接超时后回滚。服务端日志：
+
+```
+INFO:handlers:模拟网络失败: product_name=NETFAIL, 调用不存在的库存服务...
+ERROR:event_bus:处理器 handle_order_created 处理事件 OrderCreatedEvent 失败: 库存服务不可用: HTTPConnectionPool(host='127.0.0.1', port=9999): Max retries exceeded...
+INFO:main:手动回滚: 已删除订单 ORD-NET
+INFO:main:事件已处理
+```
+
+### 5. 查看日志验证
 
 回到第一个终端窗口（运行服务的那个），你会看到：
 
@@ -84,24 +124,15 @@ INFO:handlers:生产任务创建完成, 数量<=10, 无需采购
 INFO:main:事件已处理          ← 后台事件处理完成
 ```
 
-**负数库存回滚日志：**
-
-```
-INFO:main:事件已提交
-ERROR:event_bus:处理器 handle_order_created 处理事件 OrderCreatedEvent 失败: 库存不足，无法创建生产任务: quantity=-5
-INFO:main:手动回滚: 已删除订单 ORD-NEG
-INFO:main:事件已处理
-```
-
 **"事件已提交"** 和 **"事件已处理"** 两条日志是验收关键标志。
 
-### 5. 查看数据库
+### 6. 查看数据库
 
 ```bash
 python -c "from database import SessionLocal; from models import *; db=SessionLocal(); print('=== orders ==='); [print(f'  {o.order_id} | {o.product_name} | qty={o.quantity}') for o in db.query(Order).all()]; print('=== production_tasks ==='); [print(f'  order={t.order_id} | event={t.event_id[:8]}...') for t in db.query(ProductionTask).all()]; print('=== event_logs ==='); [print(f'  {e.event_type} | {e.status}') for e in db.query(EventLog).all()]; db.close()"
 ```
 
-### 6. 交互式 API 文档
+### 7. 交互式 API 文档
 
 浏览器打开：
 
@@ -111,14 +142,14 @@ http://127.0.0.1:8000/docs
 
 可以直接在页面上点击 Try it out → Execute 来测试 API。
 
-### 7. 运行测试
+### 8. 运行测试
 
 ```bash
 pip install pytest httpx
 python -m pytest test_main.py -v
 ```
 
-### 8. 清空数据库
+### 9. 清空数据库
 
 **方法一：删除数据库文件（推荐，最快捷）**
 
@@ -138,7 +169,7 @@ python -c "from database import SessionLocal; from models import *; db=SessionLo
 
 > **注意**：清空顺序必须先删 ProductionTask 和 EventLog，再删 Order，因为存在外键关联。
 
-### 9. 启动前端页面
+### 10. 启动前端页面
 
 ```bash
 pip install streamlit
@@ -223,7 +254,49 @@ if log_entry and log_entry.status == "failed":
 db.commit()
 ```
 
-### 5. 事件日志追踪
+### 5. 异常场景处理
+
+系统支持三种异常场景的模拟与处理，每种异常都有明确提示，不会导致系统崩溃。
+
+#### 超时模拟
+
+- 触发方式：`product_name="SLOW"`
+- 实现原理：handler 中 `time.sleep(5)` 模拟耗时操作，main.py 中设置 3 秒超时阈值，超时后 rollback + 标记 failed + 手动删除 Order
+- 服务端提示：`ERROR:main:后台处理事件超时: elapsed=5.0s > timeout=3s, order_id=xxx, 订单生产采购失败`
+- 前端提示：`❌ 订单生产采购失败`
+
+#### 重复提交
+
+- 触发方式：相同 order_id 再次 POST（可在创建订单表单中直接重复提交）
+- 实现原理：API 层查询 Order 表，已存在则返回 409 并携带首次订单状态；事件总线层检查 EventLog 状态，completed 则幂等跳过
+- API 返回：`409 {"detail": {"message": "order already exists", "order_id": "xxx", "status": "created"}}`
+- 前端提示：`⚠️ 重复提交: 订单 xxx 已存在，首次订单状态: created`
+- 服务端提示：`INFO:event_bus:事件已处理, 幂等跳过: event_id=xxx`
+
+#### 网络失败模拟
+
+- 触发方式：`product_name="NETFAIL"`
+- 实现原理：handler 中调用不存在的库存服务（http://127.0.0.1:9999/inventory），requests 抛出 ConnectionError/Timeout，被 event_bus 的 try-except 捕获
+- 服务端提示：`ERROR:main:后台处理事件失败: 网络服务不可用: HTTPConnectionPool...Max retries exceeded, 网络服务不可用，订单生产采购失败`
+- 前端提示：`❌ 网络服务不可用，订单生产采购失败`
+
+**三种异常统一处理链路：**
+
+```
+任何异常（超时/重复/网络失败）
+        │
+        ▼
+event_bus.dispatch 的 try-except 捕获
+        │
+        ├── db.rollback()           ← 撤销 handler 写入
+        ├── EventLog.status=failed  ← 标记失败
+        └── main.py 检测到 failed
+                │
+                ├── 手动删除 Order  ← 清理脏数据
+                └── 日志明确提示错误原因
+```
+
+### 6. 事件日志追踪
 
 所有事件的处理过程均被记录到事件日志表中，支持事后审计与问题排查。
 
@@ -231,7 +304,7 @@ db.commit()
 - 状态流转：pending → completed（成功）/ failed（失败）
 - 可通过事件ID追溯任意一笔订单的完整处理链路
 
-### 6. 健康检查
+### 7. 健康检查
 
 提供服务与数据库的连通性检测，供上层网关或监控系统调用。
 
@@ -251,11 +324,15 @@ db.commit()
   后台异步处理（BackgroundTasks）
         │
         ▼
-  OrderCreatedEvent ──→ 库存校验
+  OrderCreatedEvent ──→ 异常检测
         │
-        ├── quantity ≤ 0 ──→ 抛异常 → rollback → 手动删除 Order → failed
+        ├── product_name="SLOW" ──→ 超时 → rollback → 手动删除 Order → failed
         │
-        └── quantity > 0 ──→ 自动创建生产任务
+        ├── product_name="NETFAIL" ──→ 网络失败 → rollback → 手动删除 Order → failed
+        │
+        ├── quantity ≤ 0 ──→ 库存不足 → rollback → 手动删除 Order → failed
+        │
+        └── 正常 ──→ 自动创建生产任务
                 │
                 ▼
         ProductionTaskCreatedEvent ──→ 判断数量
@@ -282,7 +359,7 @@ db.commit()
 | 字段 | 类型 | 必填 | 说明 |
 |------|------|------|------|
 | order_id | string | 是 | 订单号，全局唯一 |
-| product_name | string | 是 | 产品名称 |
+| product_name | string | 是 | 产品名称。特殊值：`SLOW`=模拟超时，`NETFAIL`=模拟网络失败 |
 | quantity | integer | 是 | 订购数量，必须 > 0 |
 
 **响应：**
@@ -290,7 +367,7 @@ db.commit()
 | 状态码 | 含义 | 场景 |
 |--------|------|------|
 | 202 | 已受理 | 订单创建成功，后台自动处理中 |
-| 409 | 冲突 | 订单号已存在 |
+| 409 | 冲突 | 订单号已存在（重复提交） |
 | 500 | 服务器错误 | 内部异常 |
 
 **202 响应体：**
@@ -312,6 +389,30 @@ db.commit()
 {
   "status": "ok",
   "db": "connected"
+}
+```
+
+### GET /orders — 查询订单列表
+
+**响应体：**
+
+```json
+{
+  "orders": [
+    {"order_id": "ORD-001", "product_name": "Widget", "quantity": 5, "status": "created", "created_at": "..."}
+  ]
+}
+```
+
+### GET /events — 查询事件日志
+
+**响应体：**
+
+```json
+{
+  "events": [
+    {"event_id": "xxx", "event_type": "OrderCreatedEvent", "status": "completed", "order_id": "ORD-001", "created_at": "..."}
+  ]
 }
 ```
 
@@ -362,7 +463,7 @@ db.commit()
 |------|---------|---------|
 | OrderCreatedEvent | 订单创建成功 | 订单号、产品名称、数量 |
 | ProductionTaskCreatedEvent | 生产任务创建成功 | 任务编号、订单号、产品名称、数量 |
-| PurchaseNeededEvent | 生产数量超过阈值 | 采购编号、物料名称、需求数量 |
+| PurchaseNeededEvent | 生产数量超过阈值 | 采购编号、订单号、物料名称、需求数量 |
 
 ## 保障机制
 
@@ -375,6 +476,8 @@ db.commit()
 | 异步处理 | 业务逻辑在 BackgroundTasks 中执行，API 立即返回，不阻塞调用方 |
 | 失败可追溯 | 事件处理失败时日志状态标记为 failed，可通过 event_id 定位问题 |
 | 库存校验 | quantity ≤ 0 时拒绝创建生产任务，触发回滚清理 |
+| 超时保护 | 后台任务设置 3 秒超时阈值，超时自动回滚并删除脏数据 |
+| 网络容错 | 外部服务调用失败时自动回滚，系统不崩溃 |
 | 时区统一 | 所有时间字段使用 UTC，避免时区混乱 |
 
 ## 模块调用方式

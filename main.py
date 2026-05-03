@@ -1,4 +1,5 @@
 import logging
+import time as time_module
 from contextlib import asynccontextmanager
 
 from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException
@@ -14,6 +15,8 @@ from schemas import OrderCreateRequest, OrderResponse, OrderListItem, OrderListR
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+EVENT_PROCESS_TIMEOUT = 3
 
 
 @asynccontextmanager
@@ -89,7 +92,7 @@ def create_order(
     try:
         existing = db.query(Order).filter(Order.order_id == request.order_id).first()
         if existing:
-            raise HTTPException(status_code=409, detail="order already exists")
+            raise HTTPException(status_code=409, detail={"message": "order already exists", "order_id": existing.order_id, "status": existing.status})
 
         order = Order(
             order_id=request.order_id,
@@ -144,7 +147,17 @@ async def process_event_log(event_log_id: int, event):
             logger.info(f"事件已处理, 跳过: id={event_log_id}, status={log_entry.status}")
             return
 
+        start_time = time_module.time()
         event_bus.dispatch(event, db)
+        elapsed = time_module.time() - start_time
+
+        if elapsed > EVENT_PROCESS_TIMEOUT:
+            logger.error(f"后台处理事件超时: elapsed={elapsed:.1f}s > timeout={EVENT_PROCESS_TIMEOUT}s, order_id={event.order_id}, 订单生产采购失败")
+            db.rollback()
+            log_entry = db.query(EventLog).filter(EventLog.id == event_log_id).first()
+            if log_entry:
+                log_entry.status = "failed"
+                db.flush()
 
         log_entry = db.query(EventLog).filter(EventLog.id == event_log_id).first()
         if log_entry and log_entry.status == "failed":
@@ -155,7 +168,7 @@ async def process_event_log(event_log_id: int, event):
         db.commit()
         logger.info("事件已处理")
     except Exception as e:
-        logger.error(f"后台处理事件失败: {e}")
+        logger.error(f"后台处理事件失败: {e}, 网络服务不可用，订单生产采购失败")
         try:
             db.rollback()
             log_entry = db.query(EventLog).filter(EventLog.id == event_log_id).first()
