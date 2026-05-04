@@ -18,6 +18,17 @@ Base = declarative_base()
 
 def init_db():
     Base.metadata.create_all(bind=engine)
+    from models import Inventory
+    db = SessionLocal()
+    try:
+        if db.query(Inventory).count() == 0:
+            db.add(Inventory(product_name="Widget", quantity=10))
+            db.add(Inventory(product_name="Gadget", quantity=100))
+            db.add(Inventory(product_name="SLOW", quantity=999))
+            db.add(Inventory(product_name="NETFAIL", quantity=999))
+            db.commit()
+    finally:
+        db.close()
 
 
 def get_db():

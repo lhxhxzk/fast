@@ -40,3 +40,12 @@ class OrderListResponse(BaseModel):
 
 class EventListResponse(BaseModel):
     events: List[EventListItem]
+
+
+class InventoryListItem(BaseModel):
+    product_name: str
+    quantity: int
+
+
+class InventoryListResponse(BaseModel):
+    inventory: List[InventoryListItem]

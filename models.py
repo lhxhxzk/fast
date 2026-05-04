@@ -37,3 +37,11 @@ class EventLog(Base):
     payload = Column(Text, nullable=False)
     status = Column(String, default="pending")
     created_at = Column(DateTime, default=datetime.utcnow)
+
+
+class Inventory(Base):
+    __tablename__ = "inventory"
+
+    id = Column(Integer, primary_key=True, index=True)
+    product_name = Column(String, unique=True, nullable=False, index=True)
+    quantity = Column(Integer, nullable=False)

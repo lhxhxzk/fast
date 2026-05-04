@@ -9,6 +9,14 @@ API_BASE = "http://127.0.0.1:8000"
 st.set_page_config(page_title="事件驱动制造业协调", layout="wide")
 st.title("🏭 事件驱动制造业协调系统")
 
+if "last_error" in st.session_state:
+    st.error(st.session_state["last_error"])
+    del st.session_state["last_error"]
+
+if "last_success" in st.session_state:
+    st.success(st.session_state["last_success"])
+    del st.session_state["last_success"]
+
 with st.form("create_order"):
     st.subheader("📝 创建订单")
     col1, col2, col3 = st.columns(3)
@@ -28,16 +36,15 @@ if submitted:
             "quantity": quantity,
         }, timeout=5)
         if resp.status_code == 202:
-            st.success(f"✅ 订单 {order_id} 已受理，后台处理中...")
             time.sleep(3)
             check_resp = requests.get(f"{API_BASE}/orders", timeout=5)
             if check_resp.status_code == 200:
                 orders = check_resp.json().get("orders", [])
                 found = [o for o in orders if o["order_id"] == order_id]
                 if found:
-                    st.info(f"📋 订单状态: {found[0]['status']}")
+                    st.session_state["last_success"] = f"✅ 订单 {order_id} 已受理，状态: {found[0]['status']}"
                 else:
-                    st.error(f"❌ 订单生产采购失败")
+                    st.session_state["last_error"] = f"❌ 订单 {order_id} 创建失败（库存不足/数量非法/产品不存在），事件链路中可查看失败记录"
             st.rerun()
         elif resp.status_code == 409:
             check_resp = requests.get(f"{API_BASE}/orders", timeout=5)
@@ -69,16 +76,15 @@ with col_a:
                 "quantity": 5,
             }, timeout=5)
             if resp.status_code == 202:
-                st.warning("⏱️ 超时订单已提交，handler 将等待5秒，3秒后触发超时回滚...")
                 time.sleep(6)
                 check_resp = requests.get(f"{API_BASE}/orders", timeout=5)
                 if check_resp.status_code == 200:
                     orders = check_resp.json().get("orders", [])
                     found = [o for o in orders if o["order_id"] == "ORD-TIMEOUT"]
                     if found:
-                        st.info(f"📋 订单状态: {found[0]['status']}")
+                        st.session_state["last_success"] = f"✅ 订单 ORD-TIMEOUT 已受理，状态: {found[0]['status']}"
                     else:
-                        st.error("❌ 订单生产采购失败")
+                        st.session_state["last_error"] = "❌ 订单 ORD-TIMEOUT 超时回滚，事件链路中可查看失败记录"
                 st.rerun()
         except Exception as e:
             st.error(f"❌ 网络服务不可用，订单生产采购失败: {e}")
@@ -92,19 +98,38 @@ with col_c:
                 "quantity": 5,
             }, timeout=5)
             if resp.status_code == 202:
-                st.warning("🌐 网络失败订单已提交，handler 将调用不存在的库存服务...")
                 time.sleep(4)
                 check_resp = requests.get(f"{API_BASE}/orders", timeout=5)
                 if check_resp.status_code == 200:
                     orders = check_resp.json().get("orders", [])
                     found = [o for o in orders if o["order_id"] == "ORD-NETFAIL"]
                     if found:
-                        st.info(f"📋 订单状态: {found[0]['status']}")
+                        st.session_state["last_success"] = f"✅ 订单 ORD-NETFAIL 已受理，状态: {found[0]['status']}"
                     else:
-                        st.error("❌ 网络服务不可用，订单生产采购失败")
+                        st.session_state["last_error"] = "❌ 订单 ORD-NETFAIL 网络失败回滚，事件链路中可查看失败记录"
                 st.rerun()
         except Exception as e:
             st.error(f"❌ 网络服务不可用，订单生产采购失败: {e}")
+
+st.divider()
+
+st.subheader("📦 库存信息")
+try:
+    resp = requests.get(f"{API_BASE}/inventory", timeout=5)
+    if resp.status_code == 200:
+        inventory = resp.json().get("inventory", [])
+        if inventory:
+            st.dataframe(
+                inventory,
+                width="stretch",
+                hide_index=True,
+            )
+        else:
+            st.info("暂无库存记录")
+    else:
+        st.error(f"获取库存失败: {resp.status_code}")
+except Exception as e:
+    st.error(f"连接服务失败: {e}")
 
 st.divider()
 
@@ -114,10 +139,19 @@ try:
     if resp.status_code == 200:
         orders = resp.json().get("orders", [])
         if orders:
+            display_orders = []
+            for o in orders:
+                item = dict(o)
+                if o.get("status") == "created":
+                    item["状态图标"] = "✅"
+                else:
+                    item["状态图标"] = "⏳"
+                display_orders.append(item)
             st.dataframe(
-                orders,
+                display_orders,
                 width="stretch",
                 hide_index=True,
+                column_order=["状态图标", "order_id", "product_name", "quantity", "status", "created_at"],
             )
         else:
             st.info("暂无订单")
@@ -140,29 +174,40 @@ try:
                 grouped[oid].append(ev)
 
             for oid, evts in grouped.items():
-                with st.expander(f"📋 {oid}（{len(evts)} 个事件）", expanded=True):
-                    cols = st.columns(len(evts))
-                    for i, ev in enumerate(evts):
-                        with cols[i]:
-                            event_type = ev["event_type"]
-                            status = ev["status"]
-                            short_id = ev["event_id"][:8]
+                completed = [ev for ev in evts if ev["status"] == "completed"]
+                failed = [ev for ev in evts if ev["status"] == "failed"]
+                pending = [ev for ev in evts if ev["status"] not in ("completed", "failed")]
 
-                            if status == "completed":
-                                st.success(f"**{event_type}**")
-                            elif status == "failed":
-                                st.error(f"**{event_type}**")
-                            else:
-                                st.warning(f"**{event_type}**")
+                total = len(evts)
+                parts = []
+                if completed:
+                    parts.append(f"✅ {len(completed)} 成功")
+                if failed:
+                    parts.append(f"❌ {len(failed)} 失败")
+                if pending:
+                    parts.append(f"⏳ {len(pending)} 处理中")
+                summary = " | ".join(parts)
 
-                            st.caption(f"ID: {short_id}...")
-                            st.caption(f"状态: {status}")
+                with st.expander(f"📋 {oid}（{total} 个事件：{summary}）", expanded=True):
+                    if completed:
+                        st.markdown("**✅ 成功链路**")
+                        cols = st.columns(len(completed))
+                        for i, ev in enumerate(completed):
+                            with cols[i]:
+                                st.success(f"**{ev['event_type']}**")
+                                st.caption(f"ID: {ev['event_id'][:8]}...")
+                        chain_parts = [f"✅ {ev['event_type']}" for ev in completed]
+                        st.markdown(" → ".join(chain_parts))
 
-                    chain_parts = []
-                    for ev in evts:
-                        icon = "✅" if ev["status"] == "completed" else "❌" if ev["status"] == "failed" else "⏳"
-                        chain_parts.append(f"{icon} {ev['event_type']}")
-                    st.markdown(" → ".join(chain_parts))
+                    if failed:
+                        with st.expander(f"❌ 失败尝试（{len(failed)} 次）", expanded=False):
+                            for idx, ev in enumerate(failed, 1):
+                                st.error(f"第 {idx} 次：**{ev['event_type']}** — 状态: failed | ID: {ev['event_id'][:8]}...")
+
+                    if pending:
+                        st.markdown("**⏳ 处理中**")
+                        for ev in pending:
+                            st.warning(f"**{ev['event_type']}** — 状态: pending | ID: {ev['event_id'][:8]}...")
         else:
             st.info("暂无事件记录")
     else:

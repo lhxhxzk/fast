@@ -8,7 +8,7 @@ from sqlalchemy import create_engine, text
 from sqlalchemy.orm import sessionmaker
 
 from database import Base
-from models import EventLog, Order, ProductionTask
+from models import EventLog, Inventory, Order, ProductionTask
 
 
 TEST_DB_PATH = os.path.join(os.path.dirname(__file__), "test_manufacturing.db")
@@ -28,6 +28,16 @@ TestSessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=test_eng
 @pytest.fixture(autouse=True)
 def setup_database():
     Base.metadata.create_all(bind=test_engine)
+    db = TestSessionLocal()
+    try:
+        if db.query(Inventory).count() == 0:
+            db.add(Inventory(product_name="Widget", quantity=10))
+            db.add(Inventory(product_name="Gadget", quantity=100))
+            db.add(Inventory(product_name="SLOW", quantity=999))
+            db.add(Inventory(product_name="NETFAIL", quantity=999))
+            db.commit()
+    finally:
+        db.close()
     yield
     Base.metadata.drop_all(bind=test_engine)
 
@@ -106,7 +116,7 @@ def test_create_duplicate_order_409(client, db_session):
 
     response2 = client.post("/orders", json=payload)
     assert response2.status_code == 409
-    assert response2.json()["detail"] == "order already exists"
+    assert response2.json()["detail"]["message"] == "order already exists"
 
 
 def test_quantity_over_10_triggers_purchase(client, db_session):
@@ -162,7 +172,7 @@ def test_handler_exception_marks_failed(client, db_session):
     try:
         payload = {
             "order_id": "ORD-FAIL",
-            "product_name": "BrokenWidget",
+            "product_name": "Widget",
             "quantity": 2,
         }
         response = client.post("/orders", json=payload)
@@ -187,7 +197,7 @@ def test_handler_exception_marks_failed(client, db_session):
 def test_negative_quantity_rollback(client, db_session):
     payload = {
         "order_id": "ORD-NEG",
-        "product_name": "DefectiveWidget",
+        "product_name": "Widget",
         "quantity": -5,
     }
     response = client.post("/orders", json=payload)
@@ -212,6 +222,9 @@ def test_negative_quantity_rollback(client, db_session):
     )
     assert event_log is not None
     assert event_log.status == "failed"
+
+    inventory = db_session.query(Inventory).filter(Inventory.product_name == "Widget").first()
+    assert inventory.quantity == 10
 
 
 def test_timeout_simulation(client, db_session):
@@ -265,3 +278,109 @@ def test_network_failure_simulation(client, db_session):
         .first()
     )
     assert task is None
+
+
+def test_inventory_insufficient_returns_400(client, db_session):
+    payload = {
+        "order_id": "ORD-NOINV",
+        "product_name": "Widget",
+        "quantity": 20,
+    }
+    response = client.post("/orders", json=payload)
+    assert response.status_code == 202
+
+    time.sleep(1)
+
+    order = db_session.query(Order).filter(Order.order_id == "ORD-NOINV").first()
+    assert order is None
+
+    event_log = (
+        db_session.query(EventLog)
+        .filter(EventLog.event_type == "OrderCreatedEvent")
+        .first()
+    )
+    assert event_log is not None
+    assert event_log.status == "failed"
+
+    inventory = db_session.query(Inventory).filter(Inventory.product_name == "Widget").first()
+    assert inventory.quantity == 10
+
+
+def test_product_not_found_returns_400(client, db_session):
+    payload = {
+        "order_id": "ORD-UNKNOWN",
+        "product_name": "NonExistent",
+        "quantity": 1,
+    }
+    response = client.post("/orders", json=payload)
+    assert response.status_code == 202
+
+    time.sleep(1)
+
+    order = db_session.query(Order).filter(Order.order_id == "ORD-UNKNOWN").first()
+    assert order is None
+
+    event_log = (
+        db_session.query(EventLog)
+        .filter(EventLog.event_type == "OrderCreatedEvent")
+        .first()
+    )
+    assert event_log is not None
+    assert event_log.status == "failed"
+
+
+def test_inventory_deducted_after_order(client, db_session):
+    payload = {
+        "order_id": "ORD-DEDUCT",
+        "product_name": "Widget",
+        "quantity": 3,
+    }
+    response = client.post("/orders", json=payload)
+    assert response.status_code == 202
+
+    time.sleep(1)
+
+    inventory = db_session.query(Inventory).filter(Inventory.product_name == "Widget").first()
+    assert inventory.quantity == 7
+
+    task = (
+        db_session.query(ProductionTask)
+        .filter(ProductionTask.order_id == "ORD-DEDUCT")
+        .first()
+    )
+    assert task is not None
+
+
+def test_inventory_restored_on_handler_failure(client, db_session):
+    from event_bus import event_bus
+    from handlers import handle_order_created
+
+    original_handler = handle_order_created
+
+    def failing_handler(event, db):
+        inv = db.query(Inventory).filter(Inventory.product_name == event.product_name).first()
+        if inv:
+            inv.quantity -= event.quantity
+            db.flush()
+        raise RuntimeError("simulated failure after deduction")
+
+    event_bus._handlers["OrderCreatedEvent"] = [failing_handler]
+
+    try:
+        payload = {
+            "order_id": "ORD-RESTORE",
+            "product_name": "Widget",
+            "quantity": 4,
+        }
+        response = client.post("/orders", json=payload)
+        assert response.status_code == 202
+
+        time.sleep(1)
+
+        inventory = db_session.query(Inventory).filter(Inventory.product_name == "Widget").first()
+        assert inventory.quantity == 10
+
+        order = db_session.query(Order).filter(Order.order_id == "ORD-RESTORE").first()
+        assert order is None
+    finally:
+        event_bus._handlers["OrderCreatedEvent"] = [original_handler]

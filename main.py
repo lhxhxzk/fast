@@ -10,8 +10,8 @@ from database import SessionLocal, get_db, init_db
 from event_bus import event_bus
 from events import OrderCreatedEvent, event_to_json
 from handlers import handle_order_created, handle_production_task_created, handle_purchase_needed
-from models import EventLog, Order, ProductionTask
-from schemas import OrderCreateRequest, OrderResponse, OrderListItem, OrderListResponse, EventListItem, EventListResponse
+from models import EventLog, Inventory, Order, ProductionTask
+from schemas import OrderCreateRequest, OrderResponse, OrderListItem, OrderListResponse, EventListItem, EventListResponse, InventoryListItem, InventoryListResponse
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -81,6 +81,15 @@ def list_events(db: Session = Depends(get_db)):
             created_at=e.created_at.isoformat() if e.created_at else None,
         ))
     return EventListResponse(events=items)
+
+
+@app.get("/inventory", response_model=InventoryListResponse)
+def list_inventory(db: Session = Depends(get_db)):
+    items = db.query(Inventory).order_by(Inventory.product_name.asc()).all()
+    return InventoryListResponse(inventory=[
+        InventoryListItem(product_name=i.product_name, quantity=i.quantity)
+        for i in items
+    ])
 
 
 @app.post("/orders", response_model=OrderResponse, status_code=202)

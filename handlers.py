@@ -7,7 +7,7 @@ from sqlalchemy.orm import Session
 
 from event_bus import event_bus
 from events import OrderCreatedEvent, ProductionTaskCreatedEvent, PurchaseNeededEvent
-from models import ProductionTask
+from models import Inventory, ProductionTask
 
 logger = logging.getLogger(__name__)
 
@@ -40,8 +40,16 @@ def handle_order_created(event: OrderCreatedEvent, db: Session):
         logger.info(f"模拟网络失败: product_name=NETFAIL, 调用不存在的库存服务...")
         call_inventory_service(event.quantity)
 
+    inventory = db.query(Inventory).filter(Inventory.product_name == event.product_name).first()
+    if not inventory:
+        raise ValueError(f"产品不存在: {event.product_name}")
     if event.quantity <= 0:
-        raise ValueError(f"库存不足，无法创建生产任务: quantity={event.quantity}")
+        raise ValueError(f"数量必须大于0: quantity={event.quantity}")
+    if inventory.quantity < event.quantity:
+        raise ValueError(f"库存不足，无法创建生产任务: 当前库存={inventory.quantity}, 需求={event.quantity}")
+
+    inventory.quantity -= event.quantity
+    db.flush()
 
     task_id = str(uuid4())
     task = ProductionTask(
